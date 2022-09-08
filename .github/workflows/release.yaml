@@ -1,0 +1,27 @@
+name: Brew Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  homebrew-releaser:
+    runs-on: ubuntu-latest
+    name: homebrew-releaser
+    steps:
+      - name: Release kubeconfig-generator to my Homebrew tap
+        uses: Justintime50/homebrew-releaser@v1
+        with:
+          homebrew_owner: shini4i
+          homebrew_tap: homebrew-tap
+          formula_folder: Formula
+          
+          github_token: ${{ secrets.HOMEBREW_TAP_GITHUB_TOKEN }}
+          
+          commit_owner: github-actions[bot]
+          commit_email: github-actions[bot]@users.noreply.github.com
+
+          update_readme_table: true
+
+          install: 'bin.install "src/kubeconfig-generator.sh" => "kubeconfig-generator"'
