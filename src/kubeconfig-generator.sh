@@ -2,6 +2,12 @@
 
 set -e
 
+print_help() {
+    echo "Usage: $(basename "$0") <service_account> <namespace>"
+    echo "  <service_account>   Service Account to use for kubeconfig generation"
+    echo "  <namespace>         Namespace of the service account (optional)"
+}
+
 parse_args() {
   serviceAccount=$1
   echo "Generating kubeconfig for the following service account: $serviceAccount"
@@ -29,29 +35,36 @@ get_sa_details() {
 }
 
 render_kubeconfig() {
+  echo "Rendering kubeconfig..."
   cat > kubeconfig <<EOF
-  apiVersion: v1
-  kind: Config
-  clusters:
-    - name: ${clusterName}
-      cluster:
-        certificate-authority-data: ${ca}
-        server: ${server}
-  contexts:
-    - name: ${serviceAccount}@${clusterName}
-      context:
-        cluster: ${clusterName}
-        namespace: ${namespace}
-        user: ${serviceAccount}
-  users:
-    - name: ${serviceAccount}
-      user:
-        token: ${token}
-  current-context: ${serviceAccount}@${clusterName}
+apiVersion: v1
+kind: Config
+clusters:
+  - name: ${clusterName}
+    cluster:
+      certificate-authority-data: ${ca}
+      server: ${server}
+contexts:
+  - name: ${serviceAccount}@${clusterName}
+    context:
+      cluster: ${clusterName}
+      namespace: ${namespace}
+      user: ${serviceAccount}
+users:
+  - name: ${serviceAccount}
+    user:
+      token: ${token}
+current-context: ${serviceAccount}@${clusterName}
 EOF
+  echo "Kubeconfig generated successfully!"
 }
 
 main() {
+  if [ "$1" == "-h" ] || [ "$1" == "--help" ] || [ $# -lt 1 ]; then
+    print_help
+    exit 0
+  fi
+
   parse_args "$@"
 
   get_cluster_details

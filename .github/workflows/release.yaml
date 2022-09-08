@@ -24,4 +24,7 @@ jobs:
 
           update_readme_table: true
 
+          depends_on: |
+            "kubernetes-cli"
+
           install: 'bin.install "src/kubeconfig-generator.sh" => "kubeconfig-generator"'
