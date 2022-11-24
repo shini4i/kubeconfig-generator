@@ -9,6 +9,8 @@ A simple script for generating kubeconfig for a provided service account
 
 </div>
 
+> :warning: Starting from Kubernetes version 1.24 ServiceAccount token secrets are no longer automatically created. You can read more about it [here](https://kubernetes.io/docs/concepts/configuration/secret/#service-account-token-secrets).
+
 ## Requirements
 - kubectl
 

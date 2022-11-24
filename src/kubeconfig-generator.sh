@@ -28,15 +28,23 @@ get_cluster_details() {
 
 get_sa_details() {
   local secretName
+  local kubernetesVersion
 
-  secretName=$(kubectl --namespace "$namespace" get serviceAccount "$serviceAccount" -o jsonpath='{.secrets[0].name}')
-  ca=$(kubectl --namespace "$namespace" get secret "$secretName" -o jsonpath='{.data.ca\.crt}')
-  token=$(kubectl --namespace "$namespace" get secret "$secretName" -o jsonpath='{.data.token}' | base64 --decode)
+  kubernetesVersion=$(kubectl version --short | grep Server | awk '{print $3}')
+
+  if [[ "$kubernetesVersion" > "v1.23" ]]; then
+    ca=$(kubectl config view --minify --raw --output 'jsonpath={..cluster.certificate-authority-data}')
+    token=$(kubectl --namespace "$namespace" create token "$serviceAccount")
+  else
+    secretName=$(kubectl --namespace "$namespace" get serviceAccount "$serviceAccount" -o jsonpath='{.secrets[0].name}')
+    ca=$(kubectl --namespace "$namespace" get secret "$secretName" -o jsonpath='{.data.ca\.crt}')
+    token=$(kubectl --namespace "$namespace" get secret "$secretName" -o jsonpath='{.data.token}' | base64 --decode)
+  fi
 }
 
 render_kubeconfig() {
   echo "Rendering kubeconfig..."
-  cat > kubeconfig <<EOF
+  cat > "${clusterName}"-kubeconfig <<EOF
 apiVersion: v1
 kind: Config
 clusters:
