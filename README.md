@@ -3,7 +3,7 @@
 # kubeconfig-generator
 A simple script for generating kubeconfig for a provided service account
 
-![GitHub Workflow Status](https://img.shields.io/github/workflow/status/shini4i/kubeconfig-generator/Brew%20Release?style=plastic)
+![GitHub last commit (branch)](https://img.shields.io/github/last-commit/shini4i/kubeconfig-generator/main?style=plastic)
 ![Version](https://img.shields.io/github/v/tag/shini4i/kubeconfig-generator?style=plastic)
 ![license](https://img.shields.io/github/license/shini4i/kubeconfig-generator?style=plastic)
 
