@@ -33,13 +33,25 @@ get_sa_details() {
   kubernetesVersion=$(kubectl version --short | grep Server | awk '{print $3}')
 
   if [[ "$kubernetesVersion" > "v1.23" ]]; then
-    ca=$(kubectl config view --minify --raw --output 'jsonpath={..cluster.certificate-authority-data}')
-    token=$(kubectl --namespace "$namespace" create token "$serviceAccount")
+    secretName="$serviceAccount"-sa-token
+    cat <<EOF | kubectl apply -f -
+apiVersion: v1
+kind: Secret
+metadata:
+  name: "$secretName"
+  namespace: "$namespace"
+  annotations:
+    kubernetes.io/service-account.name: "$serviceAccount"
+type: kubernetes.io/service-account-token
+EOF
+    echo "Giving the service account token some time to be generated..."
+    sleep 10
   else
     secretName=$(kubectl --namespace "$namespace" get serviceAccount "$serviceAccount" -o jsonpath='{.secrets[0].name}')
-    ca=$(kubectl --namespace "$namespace" get secret "$secretName" -o jsonpath='{.data.ca\.crt}')
-    token=$(kubectl --namespace "$namespace" get secret "$secretName" -o jsonpath='{.data.token}' | base64 --decode)
   fi
+
+  ca=$(kubectl --namespace "$namespace" get secret "$secretName" -o jsonpath='{.data.ca\.crt}')
+  token=$(kubectl --namespace "$namespace" get secret "$secretName" -o jsonpath='{.data.token}' | base64 --decode)
 }
 
 render_kubeconfig() {
