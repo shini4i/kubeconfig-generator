@@ -3,9 +3,9 @@
 set -e
 
 print_help() {
-    echo "Usage: $(basename "$0") <service_account> <namespace>"
-    echo "  <service_account>   Service Account to use for kubeconfig generation"
-    echo "  <namespace>         Namespace of the service account (optional)"
+  echo "Usage: $(basename "$0") <service_account> <namespace>"
+  echo "  <service_account>   Service Account to use for kubeconfig generation"
+  echo "  <namespace>         Namespace of the service account (optional)"
 }
 
 parse_args() {
@@ -20,6 +20,26 @@ parse_args() {
   fi
 }
 
+wait_for_secret() {
+  local secretName="$1"
+  local namespace="$2"
+  local maxRetries="$3"
+  local retryInterval="$4"
+
+  echo "Giving the service account token some time to be generated..."
+
+  for i in $(seq 1 "$maxRetries"); do
+    if kubectl get secret "$secretName" --namespace "$namespace" -o jsonpath='{.data.token}' >/dev/null 2>&1 &&
+      kubectl get secret "$secretName" --namespace "$namespace" -o jsonpath='{.data.ca\.crt}' >/dev/null 2>&1; then
+      return 0
+    fi
+    sleep "$retryInterval"
+  done
+
+  echo "Error: Secret $secretName is missing required keys."
+  exit 1
+}
+
 get_cluster_details() {
   server="$(kubectl config view --minify -o jsonpath='{..server}')"
   echo Using the following endpoint: "$server"
@@ -30,11 +50,31 @@ get_sa_details() {
   local secretName
   local kubernetesVersion
 
-  kubernetesVersion=$(kubectl version --short | grep Server | awk '{print $3}')
+  kubernetesVersion=$(kubectl version --short | grep Server | awk '{ print $3 }')
 
   if [[ "$kubernetesVersion" > "v1.23" ]]; then
     secretName="$serviceAccount"-sa-token
-    cat <<EOF | kubectl apply -f -
+
+    # Create a secret for the service account
+    render_secret_for_service_account "$secretName" "$namespace"
+
+    # Wait for the secret to be created and populated with the service account token
+    wait_for_secret "$secretName" "$namespace" 30 1
+  else
+    secretName=$(kubectl --namespace "$namespace" get serviceAccount "$serviceAccount" -o jsonpath='{.secrets[0].name}')
+  fi
+
+  ca=$(kubectl --namespace "$namespace" get secret "$secretName" -o jsonpath='{.data.ca\.crt}')
+  token=$(kubectl --namespace "$namespace" get secret "$secretName" -o jsonpath='{.data.token}' | base64 --decode)
+}
+
+render_secret_for_service_account() {
+  local secretName="$1"
+  local namespace="$2"
+
+  echo "Creating secret $secretName for service account $serviceAccount..."
+
+  cat <<EOF | kubectl apply -f - >/dev/null 2>&1
 apiVersion: v1
 kind: Secret
 metadata:
@@ -44,19 +84,11 @@ metadata:
     kubernetes.io/service-account.name: "$serviceAccount"
 type: kubernetes.io/service-account-token
 EOF
-    echo "Giving the service account token some time to be generated..."
-    sleep 10
-  else
-    secretName=$(kubectl --namespace "$namespace" get serviceAccount "$serviceAccount" -o jsonpath='{.secrets[0].name}')
-  fi
-
-  ca=$(kubectl --namespace "$namespace" get secret "$secretName" -o jsonpath='{.data.ca\.crt}')
-  token=$(kubectl --namespace "$namespace" get secret "$secretName" -o jsonpath='{.data.token}' | base64 --decode)
 }
 
 render_kubeconfig() {
   echo "Rendering kubeconfig..."
-  cat > "${clusterName}"-kubeconfig <<EOF
+  cat >"${clusterName}"-kubeconfig <<EOF
 apiVersion: v1
 kind: Config
 clusters:
