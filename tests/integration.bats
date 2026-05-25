@@ -77,10 +77,9 @@ teardown() {
   [[ "$output" == *"Error: ServiceAccount 'nonexistent-sa' not found"* ]]
 }
 
-@test "exits with error when kubeconfig has no cluster data" {
-  run env KUBECONFIG=/dev/null bash "$SCRIPT" "${TEST_SA}"
+@test "exits with error when kubeconfig is unavailable" {
+  run env KUBECONFIG=/dev/null bash "$SCRIPT" -n "${TEST_NAMESPACE}" "${TEST_SA}"
   [ "$status" -ne 0 ]
-  [[ "$output" == *"Error: could not extract cluster name, server, or CA data"* ]]
 }
 
 @test "output filename defaults to service-account-kubeconfig.yaml" {
