@@ -152,8 +152,8 @@ EOF
 # Poll until the token controller populates the Secret's token field.
 wait_for_secret_token() {
   local secretName="$1"
-  local attempt populatedToken
-  for attempt in $(seq 1 "${SECRET_WAIT_RETRIES}"); do
+  local populatedToken
+  for _ in $(seq 1 "${SECRET_WAIT_RETRIES}"); do
     populatedToken="$(kubectl get secret "${secretName}" -n "${namespace}" \
       -o jsonpath='{.data.token}' 2>/dev/null || true)"
     if [[ -n "${populatedToken}" ]]; then
