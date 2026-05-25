@@ -210,13 +210,14 @@ MOCK_EOF
 }
 
 @test "script enforces set -euo pipefail" {
-  run rg -q "set -euo pipefail" "$SCRIPT"
-  [ "$status" -eq 0 ]
+  local content
+  content="$(<"$SCRIPT")"
+  [[ "$content" == *"set -euo pipefail"* ]]
 }
 
 @test "script has header documentation" {
-  run rg -q "Generates a kubeconfig" "$SCRIPT"
-  [ "$status" -eq 0 ]
-  run rg -q "Requirements: Kubernetes" "$SCRIPT"
-  [ "$status" -eq 0 ]
+  local content
+  content="$(<"$SCRIPT")"
+  [[ "$content" == *"Generates a kubeconfig"* ]]
+  [[ "$content" == *"Requirements: Kubernetes"* ]]
 }
