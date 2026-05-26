@@ -1,0 +1,35 @@
+version: '3'
+
+tasks:
+  lint:
+    desc: Lint shell scripts with ShellCheck
+    cmds:
+      - shellcheck -x src/kubeconfig-generator.sh
+
+  test:
+    desc: Run unit tests (no cluster required)
+    cmds:
+      - bats tests/kubeconfig-generator.bats
+
+  integration-test:
+    desc: Run integration tests (requires a live Kubernetes cluster)
+    cmds:
+      - bats tests/integration.bats
+
+  ci-test:
+    desc: Lint + unit tests (used in the lint CI job)
+    cmds:
+      - task: lint
+      - task: test
+
+  ci-integration:
+    desc: Lint + all tests (used in the integration CI job with Kind)
+    cmds:
+      - task: lint
+      - task: test
+      - task: integration-test
+
+  default:
+    desc: Show available tasks
+    cmds:
+      - task -l

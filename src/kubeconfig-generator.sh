@@ -1,94 +1,188 @@
 #!/usr/bin/env bash
+#
+# Generates a kubeconfig for a given ServiceAccount using either:
+#   - a temporary token (TokenRequest API via `kubectl create token`), or
+#   - a permanent token (long-lived `kubernetes.io/service-account-token` Secret).
+#
+# Requirements: Kubernetes >= 1.24, kubectl on PATH.
 
-set -e
+set -euo pipefail
 
+readonly DEFAULT_NAMESPACE="default"
+readonly DEFAULT_TOKEN_TYPE="temporary"
+readonly DEFAULT_DURATION="24h"
+readonly SECRET_WAIT_RETRIES=30
+readonly SECRET_WAIT_INTERVAL=1
+
+# Print usage information.
 print_help() {
-  echo "Usage: $(basename "$0") <service_account> <namespace>"
-  echo "  <service_account>   Service Account to use for kubeconfig generation"
-  echo "  <namespace>         Namespace of the service account (optional)"
+  cat <<EOF
+Usage: $(basename "$0") [OPTIONS] <service_account>
+
+Generate a kubeconfig file for a Kubernetes ServiceAccount.
+
+Arguments:
+  service_account         Name of the target ServiceAccount.
+
+Options:
+  -n, --namespace NAME    Namespace of the ServiceAccount
+                          (default: current context's namespace, or '${DEFAULT_NAMESPACE}').
+  -t, --type TYPE         Token type: 'temporary' or 'permanent'
+                          (default: '${DEFAULT_TOKEN_TYPE}').
+  -d, --duration DUR      Duration for temporary tokens, e.g. '1h', '24h'
+                          (default: '${DEFAULT_DURATION}'; ignored for permanent).
+  -o, --output FILE       Output path for the generated kubeconfig
+                          (default: '<service_account>-kubeconfig.yaml').
+  -h, --help              Show this help message and exit.
+
+Notes:
+  - Temporary tokens are issued via the TokenRequest API and expire automatically.
+  - Permanent tokens are backed by a long-lived Secret. Prefer temporary unless
+    a long-lived credential is genuinely required (e.g. legacy CI integrations).
+EOF
 }
 
+# Parse CLI arguments into global variables.
 parse_args() {
-  serviceAccount=$1
-  echo "Generating kubeconfig for the following service account: $serviceAccount"
+  serviceAccount=""
+  namespace=""
+  tokenType="${DEFAULT_TOKEN_TYPE}"
+  duration="${DEFAULT_DURATION}"
+  outputFile=""
 
-  if [ $# -eq 2 ]; then
-    namespace=$2
-  else
-    namespace=$(kubectl config view --minify -o jsonpath='{..namespace}')
-    echo "No namespace specified, using currently selected namespace: $namespace"
-  fi
-}
-
-wait_for_secret() {
-  local secretName="$1"
-  local namespace="$2"
-  local maxRetries="$3"
-  local retryInterval="$4"
-
-  echo "Giving the service account token some time to be generated..."
-
-  for i in $(seq 1 "$maxRetries"); do
-    if kubectl get secret "$secretName" --namespace "$namespace" -o jsonpath='{.data.token}' >/dev/null 2>&1 &&
-      kubectl get secret "$secretName" --namespace "$namespace" -o jsonpath='{.data.ca\.crt}' >/dev/null 2>&1; then
-      return 0
-    fi
-    sleep "$retryInterval"
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      -n|--namespace) namespace="${2:?missing value for $1}"; shift 2 ;;
+      -t|--type)      tokenType="${2:?missing value for $1}"; shift 2 ;;
+      -d|--duration)  duration="${2:?missing value for $1}"; shift 2 ;;
+      -o|--output)    outputFile="${2:?missing value for $1}"; shift 2 ;;
+      -h|--help)      print_help; exit 0 ;;
+      -*)             echo "Error: unknown option '$1'" >&2; print_help; exit 1 ;;
+      *)
+        if [[ -z "${serviceAccount}" ]]; then
+          serviceAccount="$1"
+        else
+          echo "Error: unexpected positional argument '$1'" >&2
+          exit 1
+        fi
+        shift
+        ;;
+    esac
   done
 
-  echo "Error: Secret $secretName is missing required keys."
-  exit 1
-}
-
-get_cluster_details() {
-  server="$(kubectl config view --minify -o jsonpath='{..server}')"
-  echo Using the following endpoint: "$server"
-  clusterName="$(kubectl config view --minify -o jsonpath='{.clusters[0].name}')"
-}
-
-get_sa_details() {
-  local secretName
-  local kubernetesVersion
-
-  kubernetesVersion=$(kubectl version --short | grep Server | awk '{ print $3 }')
-
-  if [[ "$kubernetesVersion" > "v1.23" ]]; then
-    secretName="$serviceAccount"-sa-token
-
-    # Create a secret for the service account
-    render_secret_for_service_account "$secretName" "$namespace"
-
-    # Wait for the secret to be created and populated with the service account token
-    wait_for_secret "$secretName" "$namespace" 30 1
-  else
-    secretName=$(kubectl --namespace "$namespace" get serviceAccount "$serviceAccount" -o jsonpath='{.secrets[0].name}')
+  if [[ -z "${serviceAccount}" ]]; then
+    echo "Error: <service_account> is required." >&2
+    print_help
+    exit 1
   fi
 
-  ca=$(kubectl --namespace "$namespace" get secret "$secretName" -o jsonpath='{.data.ca\.crt}')
-  token=$(kubectl --namespace "$namespace" get secret "$secretName" -o jsonpath='{.data.token}' | base64 --decode)
+  if [[ "${tokenType}" != "temporary" && "${tokenType}" != "permanent" ]]; then
+    echo "Error: --type must be 'temporary' or 'permanent', got '${tokenType}'." >&2
+    exit 1
+  fi
+
+  if [[ -z "${namespace}" ]]; then
+    namespace="$(kubectl config view --minify -o jsonpath='{..namespace}')"
+    namespace="${namespace:-${DEFAULT_NAMESPACE}}"
+  fi
+
+  # Validate names match k8s naming rules (lowercase letters, digits, hyphens, max 63 chars)
+  # to prevent YAML injection when values are interpolated into Secret/kubeconfig manifests.
+  local k8s_name_re='^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$'
+  if [[ ! "${serviceAccount}" =~ ${k8s_name_re} ]]; then
+    echo "Error: service account name '${serviceAccount}' must be lowercase letters, digits, and hyphens only." >&2
+    exit 1
+  fi
+  if [[ ! "${namespace}" =~ ${k8s_name_re} ]]; then
+    echo "Error: namespace '${namespace}' must be lowercase letters, digits, and hyphens only." >&2
+    exit 1
+  fi
+
+  if [[ -z "${outputFile}" ]]; then
+    outputFile="${serviceAccount}-kubeconfig.yaml"
+  fi
 }
 
-render_secret_for_service_account() {
+# Read cluster name, server URL, and inlined CA data from the current context.
+get_cluster_details() {
+  clusterName="$(kubectl config view --minify --flatten -o jsonpath='{.clusters[0].name}')"
+  server="$(kubectl config view --minify --flatten -o jsonpath='{.clusters[0].cluster.server}')"
+  ca="$(kubectl config view --minify --flatten -o jsonpath='{.clusters[0].cluster.certificate-authority-data}')"
+
+  if [[ -z "${clusterName}" || -z "${server}" || -z "${ca}" ]]; then
+    echo "Error: could not extract cluster name, server, or CA data from the current context." >&2
+    exit 1
+  fi
+}
+
+# Abort if the target ServiceAccount does not exist.
+verify_service_account_exists() {
+  if ! kubectl get serviceaccount "${serviceAccount}" -n "${namespace}" >/dev/null 2>&1; then
+    echo "Error: ServiceAccount '${serviceAccount}' not found in namespace '${namespace}'." >&2
+    exit 1
+  fi
+}
+
+# Issue a temporary token via the TokenRequest API.
+issue_temporary_token() {
+  echo "Requesting temporary token (duration: ${duration})..."
+  token="$(kubectl create token "${serviceAccount}" -n "${namespace}" --duration="${duration}")"
+  if [[ -z "${token}" ]]; then
+    echo "Error: failed to issue temporary token." >&2
+    exit 1
+  fi
+}
+
+# Apply a long-lived service-account-token Secret bound to the ServiceAccount.
+apply_permanent_token_secret() {
   local secretName="$1"
-  local namespace="$2"
-
-  echo "Creating secret $secretName for service account $serviceAccount..."
-
-  cat <<EOF | kubectl apply -f - >/dev/null 2>&1
+  echo "Creating long-lived Secret '${secretName}' for ServiceAccount '${serviceAccount}'..."
+  kubectl apply -f - >/dev/null <<EOF
 apiVersion: v1
 kind: Secret
 metadata:
-  name: "$secretName"
-  namespace: "$namespace"
+  name: ${secretName}
+  namespace: ${namespace}
   annotations:
-    kubernetes.io/service-account.name: "$serviceAccount"
+    kubernetes.io/service-account.name: "${serviceAccount}"
 type: kubernetes.io/service-account-token
 EOF
 }
 
+# Poll until the token controller populates the Secret's token field.
+wait_for_secret_token() {
+  local secretName="$1"
+  local populatedToken
+  for _ in $(seq 1 "${SECRET_WAIT_RETRIES}"); do
+    populatedToken="$(kubectl get secret "${secretName}" -n "${namespace}" \
+      -o jsonpath='{.data.token}' 2>/dev/null || true)"
+    if [[ -n "${populatedToken}" ]]; then
+      return 0
+    fi
+    sleep "${SECRET_WAIT_INTERVAL}"
+  done
+  echo "Error: Secret '${secretName}' was not populated after $((SECRET_WAIT_RETRIES * SECRET_WAIT_INTERVAL))s." >&2
+  exit 1
+}
+
+# Issue a permanent token by creating a Secret and reading its populated token.
+issue_permanent_token() {
+  local secretName="${serviceAccount}-long-lived-token"
+  apply_permanent_token_secret "${secretName}"
+  wait_for_secret_token "${secretName}"
+  token="$(kubectl get secret "${secretName}" -n "${namespace}" \
+    -o jsonpath='{.data.token}' | base64 --decode)"
+}
+
+# Render the kubeconfig file with 0600 permissions (contains a bearer token).
 render_kubeconfig() {
-  echo "Rendering kubeconfig..."
-  cat >"${clusterName}"-kubeconfig <<EOF
+  echo "Rendering kubeconfig to '${outputFile}'..."
+  if [[ -L "${outputFile}" ]]; then
+    echo "Error: '${outputFile}' is a symlink; refusing to write bearer token to symlink target." >&2
+    exit 1
+  fi
+  rm -f -- "${outputFile}"
+  (umask 077 && cat > "${outputFile}" <<EOF
 apiVersion: v1
 kind: Config
 clusters:
@@ -108,20 +202,23 @@ users:
       token: ${token}
 current-context: ${serviceAccount}@${clusterName}
 EOF
-  echo "Kubeconfig generated successfully!"
+)
+  echo "Done. Kubeconfig written to: ${outputFile}"
 }
 
 main() {
-  if [ "$1" == "-h" ] || [ "$1" == "--help" ] || [ $# -lt 1 ]; then
-    print_help
-    exit 0
-  fi
-
   parse_args "$@"
-
   get_cluster_details
-  get_sa_details
+  verify_service_account_exists
+
+  case "${tokenType}" in
+    temporary) issue_temporary_token ;;
+    permanent) issue_permanent_token ;;
+  esac
+
   render_kubeconfig
 }
 
-main "$@"
+if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
+  main "$@"
+fi
